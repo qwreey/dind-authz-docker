@@ -1,12 +1,23 @@
-# code-dind
+# dind-authz-docker
 
-Scoped guidance for anyone (human or agent) working under `code-dind/`. This
-is the build source for the `code-docker-dind` service (docker-compose.yml)
-- the privileged Docker-in-Docker daemon code-docker talks to via
-`DOCKER_HOST=tcp://dind:2375` to run `docker`/`docker compose`/`docker
-buildx` from inside code-docker. See root `CLAUDE.md`'s "docker-compose
-topology" section for how this fits into the wider network/trust model, and
-`.claude/dind-authz-plan.md` for the full design history/rationale behind
+Scoped guidance for anyone (human or agent) working in this repo. A
+Docker-in-Docker image with an optional authorization-plugin layer that
+denies privileged/host-escalation container creation - not actually tied to
+code-docker specifically (hence this repo's name, not `code-dind`), it's a
+generic "run a locked-down nested Docker daemon" component.
+
+Brought into [code-docker](https://github.com/qwreey/code-docker) as a git
+submodule at `code-dind/` (history preserved via `git subtree split` when it
+was extracted from there), same pattern as `router/`/`code-server-autoinstall`.
+It's the build source for code-docker's `code-docker-dind` service
+(docker-compose.yml's `build.context: "${BUILD_CONTEXT:-.}/code-dind"`) -
+the privileged daemon code-docker talks to via `DOCKER_HOST=tcp://dind:2375`
+to run `docker`/`docker compose`/`docker buildx` from inside code-docker. See
+code-docker's own root `CLAUDE.md`'s "docker-compose topology" section for
+how this fits into the wider network/trust model. Unlike `router/`, this repo
+has no compose file of its own - it's Dockerfile-only, meant to be built as a
+stage inside a consumer's own compose topology, not run standalone.
+`.claude/dind-authz-plan.md` has the full design history/rationale behind
 the authz plugin and userns-remap layering below - don't re-derive decisions
 already recorded there.
 
@@ -27,9 +38,10 @@ already recorded there.
   artifacts are present), and applies the same default-route-enforcement +
   nameserver-writing `netinit/` uses for code-docker's routing (code-docker's
   own DNS resolution moved to a local dnsmasq under `config/dns-local/`
-  instead - see root `CLAUDE.md`'s `.claude/backlog/dns-local-servfail-fix.md`
-  for why dind still uses the plain `apply_nameserver` approach this
-  paragraph describes), against dind's own netns instead (dind already has
+  instead - see code-docker's own root `CLAUDE.md`'s
+  `.claude/backlog/dns-local-servfail-fix.md` for why dind still uses the
+  plain `apply_nameserver` approach this paragraph describes), against
+  dind's own netns instead (dind already has
   `NET_ADMIN` via
   `privileged: true`, so it doesn't need a separate sidecar the way
   code-docker does) - via `apply_default_route`/`apply_nameserver`, applied
@@ -53,27 +65,33 @@ already recorded there.
 
 ## Naming
 
-This directory is named `code-dind`, not `dind`, originally so it couldn't
-collide with the repo-root runtime data directories Docker writes to - before
-this subtree existed, the *source* for the authz plugin lived at repo-root
-`./dind-authz/`, the exact same path the runtime volume defaulted to, a real
-collision. Every runtime data directory has since moved under a single
-repo-root `data/` folder (`DIND_VOLUME`/`DIND_AUTHZ_VOLUME` now default to
-`./data/dind`/`./data/dind-authz`, see docker-compose.yml and root
-CLAUDE.md's "docker-compose topology") specifically so source subtrees
-(`code-dind/`, `router/`, ...) and runtime data never share a naming
-namespace at all - the original collision this section describes can't
-recur regardless of what any subtree is named now, but the name stuck.
+This repo is `dind-authz-docker`, not `code-dind` or `dind`, because it isn't
+actually code-docker-specific - it's the generic dind+authz component,
+consumed as a submodule at `code-dind/` inside code-docker (and could be
+consumed the same way by any other project). Inside code-docker, that
+submodule path stays `code-dind`, not `dind`, originally so it couldn't
+collide with code-docker's own repo-root runtime data directories - before
+this repo was split out as its own subtree, the *source* for the authz
+plugin lived at code-docker's repo-root `./dind-authz/`, the exact same path
+the runtime volume defaulted to, a real collision. Every runtime data
+directory in code-docker has since moved under a single repo-root `data/`
+folder (`DIND_VOLUME`/`DIND_AUTHZ_VOLUME` now default to
+`./data/dind`/`./data/dind-authz`, see code-docker's own `docker-compose.yml`
+and root `CLAUDE.md`'s "docker-compose topology") specifically so source
+subtrees/submodules and runtime data never share a naming namespace at all -
+the original collision this section describes can't recur regardless of
+what this repo or its submodule path are named now, but the names stuck.
 
 ## Ground rules
 
-- Follow the root `CLAUDE.md`'s override pattern and code style (minimal
-  comments, no premature abstraction) for anything touching outside
-  `code-dind/` (docker-compose.yml, etc).
+- Follow code-docker's own root `CLAUDE.md`'s override pattern and code
+  style (minimal comments, no premature abstraction) for anything touching
+  code-docker's side of the integration (docker-compose.yml, etc) - this
+  repo itself has no override system of its own.
 - This container is meaningfully more trusted than code-docker (it's
   `privileged: true` and can create host-kernel-equivalent containers) -
   changes here should be held to that higher trust bar, same framing
   `router/CLAUDE.md` uses for router.
 - Before running `docker compose build`/`up`/`restart` against a live
-  container, confirm it's actually safe - someone else may be iterating on
-  it.
+  consumer container, confirm it's actually safe - someone else may be
+  iterating on it.
