@@ -39,7 +39,7 @@ already recorded there.
   nameserver-writing `netinit/` uses for code-docker's routing (code-docker's
   own DNS resolution moved to a local dnsmasq under `config/dns-local/`
   instead - see code-docker's own root `CLAUDE.md`'s
-  `.claude/backlog/dns-local-servfail-fix.md` for why dind still uses the
+  `.claude/archive/dns-local-servfail-fix-done.md` for why dind still uses the
   plain `apply_nameserver` approach this paragraph describes), against
   dind's own netns instead (dind already has
   `NET_ADMIN` via
