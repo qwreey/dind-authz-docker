@@ -128,18 +128,87 @@ if [ "${NETGATE_ENABLED:-true}" != "false" ]; then
 	# correct starting point.
 	wait_until "router to resolve" 60 2 getent hosts "$router_hostname" \
 		|| echo >&2 "dind-entrypoint: router did not resolve in time, starting dockerd without it - the retry loop below will keep trying"
-	apply_default_route "$router_hostname"
-	apply_nameserver "$router_hostname"
+	# The `|| true`s are load-bearing, not stylistic. Both functions return
+	# non-zero when the hostname doesn't resolve - a tolerated state here, by
+	# design (that's what the loop below is for) - but `set -eu` is in effect,
+	# so a bare call exits this entrypoint outright instead. That is exactly
+	# what happened on 2026-08-25: a network-label change recreated
+	# code-docker-internal, code-docker-router lost its `router` alias, and
+	# this line then killed PID 1 the moment the wait above timed out -
+	# `restart: unless-stopped` turning it into a silent 60s-per-attempt crash
+	# loop whose only log line was the wait_until timeout. See code-docker's
+	# .claude/archive/netinit-docker-plan-done.md ("마이그레이션 시 주의").
+	apply_default_route "$router_hostname" || true
+	apply_nameserver "$router_hostname" || true
 
 	(
 		trap 'exit 0' TERM INT
+		last_ok=""
 		while true; do
 			# router (formerly netgate) not resolving is the expected,
 			# permanent state throughout Phase 1 - neither function here
 			# treats that as fatal, they just no-op and get retried next
-			# tick.
-			apply_default_route "$router_hostname"
-			apply_nameserver "$router_hostname"
+			# tick. The `|| true`s are the same `set -e` trap as the
+			# synchronous calls above: called bare, the first failing tick
+			# killed this entire subshell, so the upkeep loop this comment
+			# promises silently stopped existing after one miss.
+			apply_default_route "$router_hostname" || true
+			apply_nameserver "$router_hostname" || true
+
+			# What gets reported below is this container's actual network
+			# *state* - a default route, and some upstream nameserver beyond
+			# Docker's own embedded resolver - not whether this tick's apply
+			# calls succeeded. Those two genuinely differ here: once
+			# apply_nameserver has added router as a second nameserver,
+			# `getent hosts "$router_hostname"` from inside dind starts
+			# failing outright, because musl queries every nameserver in
+			# parallel and takes router's own forwarder answering NXDOMAIN
+			# for that name over 127.0.0.11's correct answer (the resolver
+			# bug tracked in code-docker's
+			# .claude/backlog/dind-dns-servfail.md - code-docker itself got
+			# out of this class by running dns-local, dind hasn't yet). So
+			# reporting per-tick apply results would pin this container
+			# permanently "down" in its normal working steady state, while
+			# the state check below stays correct through it and still
+			# catches the thing that actually went wrong on 2026-08-25: a
+			# container that came up and never got a route at all.
+			if ip -4 route show default 2>/dev/null | grep -q . \
+				&& grep '^nameserver ' /etc/resolv.conf 2>/dev/null | grep -qv '^nameserver 127\.0\.0\.11$'; then
+				ok=true
+			else
+				ok=false
+			fi
+
+			# Heartbeat for this container's compose healthcheck (see
+			# docker-compose.yml). Touched only while the state above holds,
+			# so its *absence* means "no route/DNS" and its *staleness*
+			# means "this upkeep loop itself died" - the healthcheck can't
+			# tell those apart and doesn't need to. Deliberately a file
+			# rather than having the healthcheck re-derive anything: a
+			# `getent hosts` from inside the healthcheck blocks for the full
+			# resolver timeout precisely when router is missing (measured
+			# 2026-08-26: it blew past a 10s healthcheck timeout instead of
+			# failing cleanly), so the check reported an opaque timeout
+			# rather than the real reason.
+			if [ "$ok" = true ]; then
+				: > /run/dind-netgate-ok
+			else
+				rm -f /run/dind-netgate-ok
+			fi
+
+			# Log transitions only. A line every 5s forever would drown
+			# `docker compose logs`, but total silence is what let this
+			# container sit routeless and DNS-less while still looking `Up`,
+			# with nothing in its own log to say so.
+			if [ "$ok" != "$last_ok" ]; then
+				if [ "$ok" = false ]; then
+					echo >&2 "dind-entrypoint: no default route and/or no upstream nameserver - '$router_hostname' is not reachable/resolvable yet (retrying every 5s)"
+				elif [ -n "$last_ok" ]; then
+					echo "dind-entrypoint: default route and /etc/resolv.conf restored via '$router_hostname'"
+				fi
+				last_ok="$ok"
+			fi
+
 			sleep 5
 		done
 	) &
