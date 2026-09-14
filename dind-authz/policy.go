@@ -73,6 +73,83 @@ type volumeCreateBody struct {
 	DriverOpts map[string]string `json:"DriverOpts"`
 }
 
+// deniedEndpointFamilies maps an endpoint family (the first path segment
+// after the optional /v1.NN/ API-version prefix) to the reason it's refused.
+// These are whole families this environment has no use for, each of which
+// hands out host-level privilege by a route the container-create checks
+// below never see:
+//
+//   - swarm/services/tasks/nodes: a swarm task's container is created by the
+//     daemon's own swarmkit executor, not by an API call, so it never reaches
+//     this plugin at all — `docker service create --cap-add ALL --mount
+//     type=bind,source=/,...` would sail straight past every check in
+//     evaluate(). Nothing short of refusing swarm itself closes that.
+//   - secrets/configs: swarm-only endpoints, meaningless without swarm and
+//     part of the same surface.
+//   - plugins: a v2 plugin's config.json declares its own capabilities,
+//     allowAllDevices, host bind mounts and host network/pid namespaces, and
+//     the daemon then runs it as a runc container with exactly that. `docker
+//     plugin create` builds one from a local rootfs tar — no registry needed.
+//
+// Denied for every method, not just the mutating ones: the GETs (listing
+// services, inspecting nodes) are harmless on their own, but a family-wide
+// rule is one line to read and leaves no "is this one a reader?" judgement
+// for the next person touching it. Nothing in `docker`/`docker compose`/
+// `docker buildx`'s normal, non-swarm workflow calls any of these.
+//
+// Two neighbours deliberately *not* listed: /build and /session. BuildKit's
+// escalation knobs are gated daemon-side rather than in the request —
+// `RUN --security=insecure` needs the daemon's builder.entitlements.
+// security-insecure (false unless someone turns it on in dind's own
+// daemon.json), and `RUN --mount=type=bind` binds build context/stages, not
+// host paths — so denying them would break every `docker build` for no gain.
+var deniedEndpointFamilies = map[string]string{
+	"swarm":    "swarm mode is not allowed",
+	"services": "swarm services are not allowed",
+	"tasks":    "swarm tasks are not allowed",
+	"nodes":    "swarm nodes are not allowed",
+	"secrets":  "swarm secrets are not allowed",
+	"configs":  "swarm configs are not allowed",
+	"plugins":  "docker plugins are not allowed",
+}
+
+// decide is the whole policy for one authorization request: a denied
+// endpoint family first, then the body-inspecting checks for the two
+// endpoints that can smuggle host access through an otherwise ordinary
+// call. Everything else is allowed — inverting that default (allow-list the
+// endpoints `docker compose` needs) was considered and rejected as a
+// regression risk out of proportion to the gain, see the family list above.
+func decide(method, uri string, body []byte, cfg *config) (allow bool, reason string) {
+	if reason, denied := deniedEndpointFamilies[apiRoot(uri)]; denied {
+		return false, reason
+	}
+	switch {
+	case isContainersCreate(method, uri):
+		return evaluate(body, cfg)
+	case isVolumesCreate(method, uri):
+		return evaluateVolumeCreate(body, cfg)
+	}
+	return true, ""
+}
+
+// apiRoot returns a request URI's first path segment with the /v1.NN/
+// API-version prefix and any query string removed — "/v1.45/swarm/init" and
+// "/plugins/foo/enable?x=1" both reduce to the family name the deny list is
+// keyed on. Same prefix/query handling isContainersCreate does, just applied
+// from the front of the path instead of the back.
+func apiRoot(uri string) string {
+	u := uri
+	if i := strings.IndexByte(u, '?'); i >= 0 {
+		u = u[:i]
+	}
+	u = strings.TrimPrefix(u, "/")
+	first, rest, _ := strings.Cut(u, "/")
+	if len(first) > 1 && first[0] == 'v' && first[1] >= '0' && first[1] <= '9' {
+		first, _, _ = strings.Cut(rest, "/")
+	}
+	return first
+}
+
 // isContainersCreate reports whether a request is a "create a container"
 // call, independent of the /v1.NN/ API-version prefix Docker clients send.
 func isContainersCreate(method, uri string) bool {
@@ -109,9 +186,12 @@ func isVolumesCreate(method, uri string) bool {
 func evaluate(body []byte, cfg *config) (allow bool, reason string) {
 	var req createBody
 	if err := json.Unmarshal(body, &req); err != nil {
-		// Malformed body: let the daemon's own validation reject it
-		// rather than us guessing what's wrong.
-		return true, ""
+		// A body we can't parse is a body we can't check. The daemon's
+		// own decoder is more permissive than this narrow struct, so
+		// "let the daemon reject it" was a guess, not a guarantee —
+		// and the only fail-open direction left in an otherwise
+		// fail-closed plugin.
+		return false, "malformed request body"
 	}
 	hc := req.HostConfig
 
@@ -193,7 +273,7 @@ func evaluate(body []byte, cfg *config) (allow bool, reason string) {
 func evaluateVolumeCreate(body []byte, cfg *config) (allow bool, reason string) {
 	var req volumeCreateBody
 	if err := json.Unmarshal(body, &req); err != nil {
-		return true, ""
+		return false, "malformed request body"
 	}
 	if !driverOptsAllowed(req.Driver, req.DriverOpts, cfg.BindAllowPrefixes) {
 		return false, "volume driver options not allowed (bind-mount passthrough)"

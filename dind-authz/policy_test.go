@@ -51,7 +51,8 @@ func TestEvaluate(t *testing.T) {
 			`{"HostConfig":{"Mounts":[{"Type":"volume","VolumeOptions":{"DriverConfig":{"Name":"nfs","Options":{}}}}]}}`, true},
 		{"mount type volume with unrecognized driver and options denied",
 			`{"HostConfig":{"Mounts":[{"Type":"volume","VolumeOptions":{"DriverConfig":{"Name":"nfs","Options":{"share":"host:/export"}}}}]}}`, false},
-		{"malformed json fails open (daemon validates)", `not json`, true},
+		{"malformed json fails closed", `not json`, false},
+		{"truncated json fails closed", `{"HostConfig":{"Privileged"`, false},
 	}
 
 	for _, tc := range cases {
@@ -98,7 +99,7 @@ func TestEvaluateVolumeCreate(t *testing.T) {
 		{"local driver bind-passthrough outside /code denied", `{"Name":"evil","Driver":"local","DriverOpts":{"type":"none","o":"bind","device":"/"}}`, false},
 		{"local driver bind-passthrough under /code allowed", `{"Name":"ok","Driver":"local","DriverOpts":{"type":"none","o":"bind","device":"/code/x"}}`, true},
 		{"unrecognized driver with opts denied", `{"Name":"evil","Driver":"nfs","DriverOpts":{"share":"host:/export"}}`, false},
-		{"malformed json fails open (daemon validates)", `not json`, true},
+		{"malformed json fails closed", `not json`, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -138,5 +139,69 @@ func TestMergeConfig(t *testing.T) {
 	}
 	if len(dst.BindAllowPrefixes) != 2 {
 		t.Errorf("merged bind prefixes = %v, want exactly 2 (dedup /code/)", dst.BindAllowPrefixes)
+	}
+}
+
+func TestAPIRoot(t *testing.T) {
+	cases := []struct{ uri, want string }{
+		{"/v1.45/swarm/init", "swarm"},
+		{"/swarm/init", "swarm"},
+		{"/v1.51/plugins/foo/enable?timeout=0", "plugins"},
+		{"/v1.45/containers/create?name=x", "containers"},
+		{"/_ping", "_ping"},
+		{"/", ""},
+		{"/volumes", "volumes"},
+	}
+	for _, tc := range cases {
+		if got := apiRoot(tc.uri); got != tc.want {
+			t.Errorf("apiRoot(%q) = %q, want %q", tc.uri, got, tc.want)
+		}
+	}
+}
+
+// TestDecide covers the dispatch itself: the endpoint families denied
+// outright, and that denying them didn't cost the ordinary calls
+// `docker`/`docker compose`/`docker buildx` make all day.
+func TestDecide(t *testing.T) {
+	cases := []struct {
+		name        string
+		method, uri string
+		body        string
+		allow       bool
+	}{
+		{"swarm init denied", "POST", "/v1.45/swarm/init", `{}`, false},
+		{"swarm join denied", "POST", "/v1.45/swarm/join", `{}`, false},
+		{"swarm inspect denied too", "GET", "/v1.45/swarm", ``, false},
+		{"services create denied", "POST", "/services/create", `{}`, false},
+		{"services list denied", "GET", "/v1.45/services", ``, false},
+		{"tasks list denied", "GET", "/v1.45/tasks", ``, false},
+		{"nodes list denied", "GET", "/v1.45/nodes", ``, false},
+		{"secrets create denied", "POST", "/v1.45/secrets/create", `{}`, false},
+		{"configs create denied", "POST", "/v1.45/configs/create", `{}`, false},
+		{"plugins create denied", "POST", "/v1.45/plugins/create?name=x", ``, false},
+		{"plugins enable denied", "POST", "/v1.45/plugins/foo/enable", ``, false},
+		{"plugins list denied", "GET", "/v1.45/plugins", ``, false},
+		{"malformed container create denied", "POST", "/v1.45/containers/create", `not json`, false},
+		{"privileged container create still denied", "POST", "/v1.45/containers/create", `{"HostConfig":{"Privileged":true}}`, false},
+		{"malformed volume create denied", "POST", "/v1.45/volumes/create", `not json`, false},
+		{"normal container create allowed", "POST", "/v1.45/containers/create?name=web", `{"Image":"alpine","HostConfig":{"Binds":["/code/x:/x"]}}`, true},
+		{"container list allowed", "GET", "/v1.45/containers/json", ``, true},
+		{"container start allowed", "POST", "/v1.45/containers/abc/start", ``, true},
+		{"image pull allowed", "POST", "/v1.45/images/create?fromImage=alpine", ``, true},
+		{"build allowed", "POST", "/v1.45/build?t=x", ``, true},
+		{"buildkit session allowed", "POST", "/v1.45/session", ``, true},
+		{"ping allowed", "GET", "/_ping", ``, true},
+		{"normal volume create allowed", "POST", "/v1.45/volumes/create", `{"Name":"mydata"}`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			allow, reason := decide(tc.method, tc.uri, []byte(tc.body), testConfig())
+			if allow != tc.allow {
+				t.Errorf("decide(%s %s, %s) = allow=%v reason=%q, want allow=%v", tc.method, tc.uri, tc.body, allow, reason, tc.allow)
+			}
+			if !allow && reason == "" {
+				t.Errorf("decide(%s %s) denied with no reason", tc.method, tc.uri)
+			}
+		})
 	}
 }

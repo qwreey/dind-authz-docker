@@ -26,7 +26,8 @@ already recorded there.
 - `Dockerfile` - three build-target stages layered on top of stock
   `docker:dind`: `dind` (no protection), `dind-authz` (default - denies
   privileged/dangerous-cap/host-namespace/out-of-`/code`-mount container
-  creation via a hand-written Go authz plugin), `dind-authz-remap`
+  creation, plus the swarm and v2-plugin endpoint families wholesale, via a
+  hand-written Go authz plugin), `dind-authz-remap`
   (`dind-authz` + Docker userns-remap, opt-in). `docker-compose.yml`'s
   `DIND_TARGET` env var picks which stage `code-docker-dind` actually
   builds/runs - a build-stage choice rather than a runtime toggle so an
@@ -56,7 +57,24 @@ already recorded there.
   (floating `#main` ref, not a local checkout/submodule) - see that repo's
   own `CLAUDE.md` for why.
 - `dind-authz/` - the authz plugin's Go source (own `go.mod`, standalone
-  module, `go test ./...` runs directly from here).
+  module, `go test ./...` runs directly from here). Every request goes
+  through `policy.go`'s `decide()`, which does two things: refuse a denied
+  *endpoint family* outright (`deniedEndpointFamilies` - swarm/services/
+  tasks/nodes/secrets/configs and plugins, all methods), then body-inspect
+  the two endpoints that can smuggle host access through an otherwise
+  ordinary call (`containers/create`, `volumes/create`). The family list is
+  not "endpoints we don't use" tidiness - each one *routes around* the body
+  checks: a swarm task's container is built by the daemon's own swarmkit
+  executor and never reaches an authz plugin at all, and a v2 plugin's
+  `config.json` declares its own caps/devices/host mounts/host namespaces
+  and gets run as a runc container with exactly that. `/build` and
+  `/session` are deliberately *not* in that list (BuildKit's escalation
+  knobs are daemon-side entitlements, off by default, so denying them would
+  break every `docker build` for nothing) - see the comment on
+  `deniedEndpointFamilies` before adding or removing an entry. Both
+  body-inspecting checks fail **closed** on a body they can't parse: a body
+  this plugin's narrow structs can't decode is a body it can't check, and
+  the daemon's own decoder is more permissive than they are.
 - `config/dind-authz/*.default.json` - baked-in allow-list defaults for the
   authz plugin, merged at container-start with the live, host-editable
   `DIND_AUTHZ_VOLUME` mount (`/etc/dind-authz.d`) - deliberately never

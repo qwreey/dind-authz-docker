@@ -1,9 +1,13 @@
 // dind-authz is a minimal Docker Engine authorization plugin. It denies
 // container-create requests that ask for host-level privilege (Privileged,
 // a CapAdd/SecurityOpt/pid-net-ipc-cgroupns=host/device escalation, or a
-// bind-mount source outside an explicit allow-list) and allows everything
+// bind-mount source outside an explicit allow-list), refuses whole endpoint
+// families that route around those checks entirely (swarm and everything
+// under it, plus v2 plugins — see policy.go's deniedEndpointFamilies for
+// why each one is a bypass rather than merely unused), and allows everything
 // else. Policy is a merged set of *.json fragments loaded from one or more
-// conf.d-style directories — see policy.go's config struct.
+// conf.d-style directories — see policy.go's config struct; the one decision
+// point is policy.go's decide().
 package main
 
 import (
@@ -60,16 +64,7 @@ func main() {
 			writeJSON(w, authZRes{Allow: false, Msg: "dind-authz: malformed request"})
 			return
 		}
-		var allow bool
-		var reason string
-		switch {
-		case isContainersCreate(req.RequestMethod, req.RequestURI):
-			allow, reason = evaluate(req.RequestBody, cfg)
-		case isVolumesCreate(req.RequestMethod, req.RequestURI):
-			allow, reason = evaluateVolumeCreate(req.RequestBody, cfg)
-		default:
-			allow, reason = true, ""
-		}
+		allow, reason := decide(req.RequestMethod, req.RequestURI, req.RequestBody, cfg)
 		if !allow {
 			log.Printf("dind-authz: denied %s %s: %s", req.RequestMethod, req.RequestURI, reason)
 		}
