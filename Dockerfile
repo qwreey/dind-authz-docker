@@ -14,14 +14,16 @@
 # `./data/dind-authz`, see docker-compose.yml) specifically so no source
 # subtree can ever collide with runtime data again - see code-dind/CLAUDE.md's
 # "Naming" section.
-# netshare is qwreey/router-docker-client's own subdirectory - fetched at build time
-# (floating #main ref, see that repo's own CLAUDE.md), not a local checkout. Its own
+# netshare is qwreey/router-docker-client's own subdirectory - fetched at build time,
+# pinned to that repo's release tag (see its own CLAUDE.md; code-docker's
+# dev-bump-router-client.sh moves this default), not a local checkout. Its own
 # stage so a BuildKit named context of the same name replaces it: `docker build
 # --build-context netshare=<dir>`, or build.additional_contexts from code-docker's
 # compose (ROUTER_CLIENT_SOURCE there) to build against a local checkout. A bare
 # `docker build .` needs neither and gets this default.
 FROM scratch AS netshare
-ADD https://github.com/qwreey/router-docker-client.git#main:netshare /
+ARG ROUTER_CLIENT_REF=v0.1.0
+ADD https://github.com/qwreey/router-docker-client.git#${ROUTER_CLIENT_REF}:netshare /
 
 FROM docker:dind AS dind
 # iproute2: dind-entrypoint.sh's own interface-picking logic (see its

@@ -56,8 +56,8 @@ already recorded there.
 - `netshare` functions (`apply_default_route`/`apply_nameserver`) come from
   [qwreey/router-docker-client](https://github.com/qwreey/router-docker-client)'s
   `netshare/` subdirectory, fetched by the Dockerfile's own `FROM scratch AS
-  netshare` stage (`ADD ...router-docker-client.git#main:netshare /`, floating
-  `#main` ref - see that repo's own `CLAUDE.md` for why). A BuildKit named
+  netshare` stage (`ADD ...router-docker-client.git#${ROUTER_CLIENT_REF}:netshare /`,
+  pinned to that repo's release tag - see its own `CLAUDE.md`). A BuildKit named
   context called `netshare` replaces that stage, which is how code-docker's
   compose builds against a local checkout (`ROUTER_CLIENT_SOURCE`).
 - `dind-authz/` - the authz plugin's Go source (own `go.mod`, standalone
