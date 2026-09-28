@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func testConfig() *config {
 	return &config{
@@ -203,5 +207,50 @@ func TestDecide(t *testing.T) {
 				t.Errorf("decide(%s %s) denied with no reason", tc.method, tc.uri)
 			}
 		})
+	}
+}
+
+// TestBindSourceSymlinks covers F02 from the 2026-09-16 audit: a symlink
+// under an allowed root must be judged by where it points, not by its name.
+func TestBindSourceSymlinks(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "code")
+	outside := filepath.Join(base, "etc")
+	for _, d := range []string{root, outside, filepath.Join(root, "proj")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustLink := func(target, link string) {
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustLink(outside, filepath.Join(root, "escape"))
+	mustLink("/", filepath.Join(root, "rootfs"))
+	mustLink(filepath.Join(root, "proj"), filepath.Join(root, "inside"))
+	mustLink(filepath.Join(outside, "nope"), filepath.Join(root, "dangling"))
+	roots := []string{root + "/"}
+
+	cases := []struct {
+		src  string
+		want bool
+	}{
+		{filepath.Join(root, "proj"), true},
+		{filepath.Join(root, "proj", "not-yet-created", "sub"), true},
+		{filepath.Join(root, "inside"), true},
+		{filepath.Join(root, "inside", "new"), true},
+		{filepath.Join(root, "escape"), false},
+		{filepath.Join(root, "escape", "passwd"), false},
+		{filepath.Join(root, "rootfs"), false},
+		{filepath.Join(root, "dangling"), false},
+		{filepath.Join(root, "dangling", "x"), false},
+		{outside, false},
+		{"named-volume", true},
+	}
+	for _, c := range cases {
+		if got := bindSourceAllowed(c.src, roots); got != c.want {
+			t.Errorf("bindSourceAllowed(%q) = %v, want %v", c.src, got, c.want)
+		}
 	}
 }

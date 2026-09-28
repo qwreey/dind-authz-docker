@@ -2,7 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
 )
 
@@ -311,21 +315,76 @@ func driverOptsAllowed(driverName string, opts map[string]string, allowRoots []s
 // — they live inside dind's own storage, not the host filesystem. Absolute
 // paths must equal, or fall under, one of the configured allow-list roots
 // (each entry may be given with or without a trailing slash — "/code" and
-// "/code/" mean the same root). Both src and each root are lexically
-// cleaned (path.Clean) before comparison — without this, a source like
-// "/code/../etc" textually satisfies a raw prefix check while actually
-// resolving (at the mount() syscall / runc layer) to a path outside every
-// allowed root.
+// "/code/" mean the same root), and must do so twice over:
+//
+//   - lexically, after path.Clean, so "/code/../etc" is refused;
+//   - after following symlinks on disk, because that is what the daemon
+//     does when it mounts the source. Everything under /code is writable by
+//     the code-docker container that talks to this daemon, so without this
+//     a symlink /code/x -> / made the whole of dind's own filesystem
+//     (privileged, so including its /dev) mountable while the request text
+//     said "/code/x".
+//
+// This plugin runs inside the dind container, so it sees the same
+// filesystem the daemon resolves against. What it cannot close is the race
+// between this check and the daemon's mount: a caller that swaps a checked
+// directory for a symlink in between still wins. The dind-authz-remap
+// target (userns-remap) is the layer that bounds what that race can reach.
 func bindSourceAllowed(src string, allowRoots []string) bool {
 	if !strings.HasPrefix(src, "/") {
 		return true
 	}
 	cleanSrc := path.Clean(src)
+	resolvedSrc, err := resolveOnDisk(cleanSrc)
+	if err != nil {
+		return false
+	}
 	for _, root := range allowRoots {
 		cleanRoot := path.Clean(root)
-		if cleanSrc == cleanRoot || strings.HasPrefix(cleanSrc, cleanRoot+"/") {
+		if !underRoot(cleanSrc, cleanRoot) {
+			continue
+		}
+		resolvedRoot, err := resolveOnDisk(cleanRoot)
+		if err != nil {
+			continue
+		}
+		if underRoot(resolvedSrc, resolvedRoot) {
 			return true
 		}
 	}
 	return false
+}
+
+func underRoot(p, root string) bool {
+	return p == root || root == "/" || strings.HasPrefix(p, root+"/")
+}
+
+// resolveOnDisk returns p with every symlink resolved. A bind source that
+// doesn't exist yet is legal — the daemon creates a missing `-v` source
+// directory — so the deepest existing ancestor is resolved and the missing
+// tail re-appended; that tail can't contain symlinks, since it doesn't
+// exist. A component that exists only as a dangling symlink is an error
+// rather than "missing": the daemon would follow it when creating the
+// directory, and where it points is exactly what this check can't see.
+func resolveOnDisk(p string) (string, error) {
+	missing := ""
+	cur := p
+	for {
+		resolved, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			return path.Join(resolved, missing), nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		if _, lerr := os.Lstat(cur); lerr == nil {
+			return "", errors.New("dangling symlink in bind source: " + cur)
+		}
+		parent := path.Dir(cur)
+		if parent == cur {
+			return "", err
+		}
+		missing = path.Join(path.Base(cur), missing)
+		cur = parent
+	}
 }
