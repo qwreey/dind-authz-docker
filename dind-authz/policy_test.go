@@ -33,6 +33,7 @@ func TestEvaluate(t *testing.T) {
 		{"network bridge passes", `{"HostConfig":{"NetworkMode":"bridge"}}`, true},
 		{"ipc host denied", `{"HostConfig":{"IpcMode":"host"}}`, false},
 		{"cgroupns host denied", `{"HostConfig":{"CgroupnsMode":"host"}}`, false},
+		{"userns host denied", `{"HostConfig":{"UsernsMode":"host"}}`, false},
 		{"device passthrough denied", `{"HostConfig":{"Devices":[{"PathOnHost":"/dev/mem"}]}}`, false},
 		{"device cgroup rule denied", `{"HostConfig":{"DeviceCgroupRules":["a *:* rwm"]}}`, false},
 		{"bind under /code allowed", `{"HostConfig":{"Binds":["/code/myproject/pgdata:/var/lib/postgresql/data"]}}`, true},

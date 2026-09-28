@@ -51,6 +51,7 @@ type createBody struct {
 		NetworkMode       string            `json:"NetworkMode"`
 		IpcMode           string            `json:"IpcMode"`
 		CgroupnsMode      string            `json:"CgroupnsMode"`
+		UsernsMode        string            `json:"UsernsMode"`
 		Devices           []json.RawMessage `json:"Devices"`
 		DeviceCgroupRules []string          `json:"DeviceCgroupRules"`
 		Binds             []string          `json:"Binds"`
@@ -230,6 +231,12 @@ func evaluate(body []byte, cfg *config) (allow bool, reason string) {
 	}
 	if hc.CgroupnsMode == "host" {
 		return false, "cgroupns=host is not allowed"
+	}
+	// Under the dind-authz-remap target this is the per-container way out
+	// of userns-remap - the one layer meant to hold if a request slips past
+	// everything else here. Harmless to refuse on the other targets too.
+	if hc.UsernsMode == "host" {
+		return false, "userns=host is not allowed"
 	}
 	if len(hc.Devices) > 0 {
 		return false, "device passthrough is not allowed"
