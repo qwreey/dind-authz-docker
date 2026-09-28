@@ -6,11 +6,14 @@ denies privileged/host-escalation container creation - not actually tied to
 code-docker specifically (hence this repo's name, not `code-dind`), it's a
 generic "run a locked-down nested Docker daemon" component.
 
-Brought into [code-docker](https://github.com/qwreey/code-docker) as a git
-submodule at `code-dind/` (history preserved via `git subtree split` when it
-was extracted from there), same pattern as `router/`/`code-server-autoinstall`.
-It's the build source for code-docker's `code-docker-dind` service
-(docker-compose.yml's `build.context: "${BUILD_CONTEXT:-.}/code-dind"`) -
+Consumed by [code-docker](https://github.com/qwreey/code-docker) as a
+**remote-git build context pinned to a release tag**
+(`https://github.com/qwreey/dind-authz-docker.git#<tag>`, `DIND_REF` in its
+`.env`; `DIND_CONTEXT` points it at a local clone, conventionally
+code-docker's `dev/dind-authz-docker`). It used to be a git submodule at
+`code-dind/` (history preserved via `git subtree split` when it was extracted
+from there), so a change here reaches code-docker only through a new tag.
+It's the build source for code-docker's `code-docker-dind` service -
 the privileged daemon code-docker talks to via `DOCKER_HOST=tcp://dind:2375`
 to run `docker`/`docker compose`/`docker buildx` from inside code-docker. See
 code-docker's own root `CLAUDE.md`'s "docker-compose topology" section for
@@ -52,10 +55,11 @@ already recorded there.
   background loop, same shape as before.
 - `netshare` functions (`apply_default_route`/`apply_nameserver`) come from
   [qwreey/router-docker-client](https://github.com/qwreey/router-docker-client)'s
-  `netshare/` subdirectory, fetched directly into the image via the
-  Dockerfile's own `ADD https://github.com/qwreey/router-docker-client.git#main:netshare /netshare`
-  (floating `#main` ref, not a local checkout/submodule) - see that repo's
-  own `CLAUDE.md` for why.
+  `netshare/` subdirectory, fetched by the Dockerfile's own `FROM scratch AS
+  netshare` stage (`ADD ...router-docker-client.git#main:netshare /`, floating
+  `#main` ref - see that repo's own `CLAUDE.md` for why). A BuildKit named
+  context called `netshare` replaces that stage, which is how code-docker's
+  compose builds against a local checkout (`ROUTER_CLIENT_SOURCE`).
 - `dind-authz/` - the authz plugin's Go source (own `go.mod`, standalone
   module, `go test ./...` runs directly from here). Every request goes
   through `policy.go`'s `decide()`, which does two things: refuse a denied
@@ -85,9 +89,9 @@ already recorded there.
 
 This repo is `dind-authz-docker`, not `code-dind` or `dind`, because it isn't
 actually code-docker-specific - it's the generic dind+authz component,
-consumed as a submodule at `code-dind/` inside code-docker (and could be
-consumed the same way by any other project). Inside code-docker, that
-submodule path stays `code-dind`, not `dind`, originally so it couldn't
+consumed by code-docker (and could be consumed the same way by any other
+project). Inside code-docker it used to be checked out as a submodule at
+`code-dind/`, not `dind/`, originally so it couldn't
 collide with code-docker's own repo-root runtime data directories - before
 this repo was split out as its own subtree, the *source* for the authz
 plugin lived at code-docker's repo-root `./dind-authz/`, the exact same path
@@ -98,7 +102,7 @@ folder (`DIND_VOLUME`/`DIND_AUTHZ_VOLUME` now default to
 and root `CLAUDE.md`'s "docker-compose topology") specifically so source
 subtrees/submodules and runtime data never share a naming namespace at all -
 the original collision this section describes can't recur regardless of
-what this repo or its submodule path are named now, but the names stuck.
+what this repo was checked out as, but the names stuck.
 
 ## Ground rules
 

@@ -14,6 +14,15 @@
 # `./data/dind-authz`, see docker-compose.yml) specifically so no source
 # subtree can ever collide with runtime data again - see code-dind/CLAUDE.md's
 # "Naming" section.
+# netshare is qwreey/router-docker-client's own subdirectory - fetched at build time
+# (floating #main ref, see that repo's own CLAUDE.md), not a local checkout. Its own
+# stage so a BuildKit named context of the same name replaces it: `docker build
+# --build-context netshare=<dir>`, or build.additional_contexts from code-docker's
+# compose (ROUTER_CLIENT_SOURCE there) to build against a local checkout. A bare
+# `docker build .` needs neither and gets this default.
+FROM scratch AS netshare
+ADD https://github.com/qwreey/router-docker-client.git#main:netshare /
+
 FROM docker:dind AS dind
 # iproute2: dind-entrypoint.sh's own interface-picking logic (see its
 # comments below) plus the Phase 1 egress-netgate route loop it now also
@@ -21,9 +30,7 @@ FROM docker:dind AS dind
 # PID 1 init so that loop's forked `ip`/`getent` children get reaped once
 # dockerd takes over as PID 1 - see dind-entrypoint.sh's own comment on this.
 RUN apk add --no-cache iproute2 tini
-# netshare is qwreey/router-docker-client's own subdirectory - fetched directly at build
-# time (floating #main ref, see that repo's own CLAUDE.md), not a local checkout.
-ADD https://github.com/qwreey/router-docker-client.git#main:netshare /netshare
+COPY --from=netshare / /netshare
 COPY script/dind-entrypoint.sh /dind-entrypoint.sh
 ENTRYPOINT ["/dind-entrypoint.sh"]
 
