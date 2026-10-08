@@ -197,6 +197,16 @@ func TestDecide(t *testing.T) {
 		{"buildkit session allowed", "POST", "/v1.45/session", ``, true},
 		{"ping allowed", "GET", "/_ping", ``, true},
 		{"normal volume create allowed", "POST", "/v1.45/volumes/create", `{"Name":"mydata"}`, true},
+		// The daemon routes the decoded path, so an encoded one must be
+		// judged the same way (2026-10-08 audit B-01).
+		{"encoded create still denied", "POST", "/v1.45/containers/cr%65ate", `{"HostConfig":{"Privileged":true,"Binds":["/:/host"]}}`, false},
+		{"encoded family segment still denied", "POST", "/v1.45/%63ontainers/create", `{"HostConfig":{"Privileged":true}}`, false},
+		{"encoded slash still denied", "POST", "/v1.45/containers%2Fcreate", `{"HostConfig":{"Privileged":true}}`, false},
+		{"dot segments still denied", "POST", "/v1.45/images/../containers/create", `{"HostConfig":{"Privileged":true}}`, false},
+		{"encoded swarm denied", "POST", "/v1.45/%73warm/init", `{}`, false},
+		{"encoded plugins denied", "POST", "/v1.45/%70lugins/create", ``, false},
+		{"encoded volume create still checked", "POST", "/v1.45/volumes/cr%65ate", `not json`, false},
+		{"unparsable URI denied", "GET", "/v1.45/containers/%zz/json", ``, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

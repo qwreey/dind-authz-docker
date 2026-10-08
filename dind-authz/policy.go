@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -125,6 +126,9 @@ var deniedEndpointFamilies = map[string]string{
 // endpoints `docker compose` needs) was considered and rejected as a
 // regression risk out of proportion to the gain, see the family list above.
 func decide(method, uri string, body []byte, cfg *config) (allow bool, reason string) {
+	if _, ok := requestPath(uri); !ok {
+		return false, "request URI could not be parsed"
+	}
 	if reason, denied := deniedEndpointFamilies[apiRoot(uri)]; denied {
 		return false, reason
 	}
@@ -137,16 +141,26 @@ func decide(method, uri string, body []byte, cfg *config) (allow bool, reason st
 	return true, ""
 }
 
-// apiRoot returns a request URI's first path segment with the /v1.NN/
-// API-version prefix and any query string removed — "/v1.45/swarm/init" and
-// "/plugins/foo/enable?x=1" both reduce to the family name the deny list is
-// keyed on. Same prefix/query handling isContainersCreate does, just applied
-// from the front of the path instead of the back.
-func apiRoot(uri string) string {
-	u := uri
-	if i := strings.IndexByte(u, '?'); i >= 0 {
-		u = u[:i]
+// requestPath is the path the daemon will actually route uri to: query
+// removed, percent-encoding decoded, then cleaned. The daemon is handed the
+// raw RequestURI here but its router matches the decoded path, so comparing
+// the raw string let /v1.45/containers/cr%65ate - or %73warm/init, or
+// create%3Fx=1 - through as "no matching endpoint" while dockerd ran the
+// real handler. ok is false when uri doesn't parse; decide denies those.
+func requestPath(uri string) (p string, ok bool) {
+	u, err := url.ParseRequestURI(uri)
+	if err != nil || u.Path == "" {
+		return "", false
 	}
+	return path.Clean(u.Path), true
+}
+
+// apiRoot returns a request URI's first path segment with the /v1.NN/
+// API-version prefix removed, on the decoded path (requestPath) -
+// "/v1.45/swarm/init" and "/plugins/foo/enable?x=1" both reduce to the
+// family name the deny list is keyed on.
+func apiRoot(uri string) string {
+	u, _ := requestPath(uri)
 	u = strings.TrimPrefix(u, "/")
 	first, rest, _ := strings.Cut(u, "/")
 	if len(first) > 1 && first[0] == 'v' && first[1] >= '0' && first[1] <= '9' {
@@ -156,16 +170,14 @@ func apiRoot(uri string) string {
 }
 
 // isContainersCreate reports whether a request is a "create a container"
-// call, independent of the /v1.NN/ API-version prefix Docker clients send.
+// call, independent of the /v1.NN/ API-version prefix Docker clients send
+// (on the decoded path, see requestPath).
 func isContainersCreate(method, uri string) bool {
 	if method != "POST" {
 		return false
 	}
-	u := uri
-	if i := strings.IndexByte(u, '?'); i >= 0 {
-		u = u[:i]
-	}
-	return path.Base(u) == "create" && strings.HasSuffix(path.Dir(u), "/containers")
+	u, ok := requestPath(uri)
+	return ok && path.Base(u) == "create" && strings.HasSuffix(path.Dir(u), "/containers")
 }
 
 // isVolumesCreate reports whether a request is a "create a volume" call —
@@ -177,11 +189,8 @@ func isVolumesCreate(method, uri string) bool {
 	if method != "POST" {
 		return false
 	}
-	u := uri
-	if i := strings.IndexByte(u, '?'); i >= 0 {
-		u = u[:i]
-	}
-	return path.Base(u) == "create" && strings.HasSuffix(path.Dir(u), "/volumes")
+	u, ok := requestPath(uri)
+	return ok && path.Base(u) == "create" && strings.HasSuffix(path.Dir(u), "/volumes")
 }
 
 // evaluate decides whether a container-create request is allowed under cfg.
