@@ -22,7 +22,7 @@
 # compose (ROUTER_CLIENT_SOURCE there) to build against a local checkout. A bare
 # `docker build .` needs neither and gets this default.
 FROM scratch AS netshare
-ARG ROUTER_CLIENT_REF=v0.1.0
+ARG ROUTER_CLIENT_REF=v0.1.1
 ADD https://github.com/qwreey/router-docker-client.git#${ROUTER_CLIENT_REF}:netshare /
 
 FROM docker:dind AS dind
