@@ -218,6 +218,16 @@ func isContainersExec(method, uri string) bool {
 	return ok && path.Base(u) == "exec" && strings.HasSuffix(path.Dir(path.Dir(u)), "/containers")
 }
 
+// splitSecurityOpt splits a SecurityOpt entry the way dockerd does: on the
+// first '=' when there is one, else on the first ':' (the deprecated form).
+func splitSecurityOpt(opt string) (key, value string) {
+	if k, v, ok := strings.Cut(opt, "="); ok {
+		return k, v
+	}
+	k, v, _ := strings.Cut(opt, ":")
+	return k, v
+}
+
 // evaluateExec refuses `docker exec --privileged`: the daemon gives that
 // process every capability and no seccomp/AppArmor profile inside an
 // otherwise unprivileged container, which is evaluate()'s Privileged check
@@ -253,7 +263,7 @@ func evaluate(body []byte, cfg *config) (allow bool, reason string) {
 		return false, "privileged containers are not allowed"
 	}
 	for _, capName := range hc.CapAdd {
-		normalized := strings.ToUpper(strings.TrimPrefix(capName, "CAP_"))
+		normalized := strings.TrimPrefix(strings.ToUpper(capName), "CAP_")
 		if !cfg.AllowedCaps[normalized] {
 			return false, "capability not in allow-list: " + capName
 		}
@@ -269,6 +279,11 @@ func evaluate(body []byte, cfg *config) (allow bool, reason string) {
 			strings.Contains(lower, "systempaths=unconfined") ||
 			strings.Contains(lower, "systempaths:unconfined") {
 			return false, "disabling seccomp/apparmor/labeling/masked paths is not allowed: " + opt
+		}
+		// A seccomp value other than the built-in default is a whole
+		// profile, which may allow every syscall - the same as unconfined.
+		if key, value := splitSecurityOpt(opt); strings.EqualFold(key, "seccomp") && value != "builtin" {
+			return false, "custom seccomp profiles are not allowed"
 		}
 	}
 	if hc.PidMode == "host" {
