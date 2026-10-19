@@ -93,6 +93,25 @@ func TestIsContainersCreate(t *testing.T) {
 	}
 }
 
+func TestIsContainersExec(t *testing.T) {
+	cases := []struct {
+		method, uri string
+		want        bool
+	}{
+		{"POST", "/v1.43/containers/abc123/exec", true},
+		{"POST", "/containers/abc123/exec", true},
+		{"GET", "/v1.43/containers/abc123/exec", false},
+		{"POST", "/v1.43/containers/create", false},
+		{"POST", "/v1.43/exec/abc123/start", false},
+		{"POST", "/v1.43/containers/exec", false},
+	}
+	for _, tc := range cases {
+		if got := isContainersExec(tc.method, tc.uri); got != tc.want {
+			t.Errorf("isContainersExec(%q, %q) = %v, want %v", tc.method, tc.uri, got, tc.want)
+		}
+	}
+}
+
 func TestEvaluateVolumeCreate(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -197,6 +216,13 @@ func TestDecide(t *testing.T) {
 		{"buildkit session allowed", "POST", "/v1.45/session", ``, true},
 		{"ping allowed", "GET", "/_ping", ``, true},
 		{"normal volume create allowed", "POST", "/v1.45/volumes/create", `{"Name":"mydata"}`, true},
+		{"privileged exec denied", "POST", "/v1.45/containers/abc/exec", `{"Cmd":["sh"],"Privileged":true}`, false},
+		{"privileged exec denied without version prefix", "POST", "/containers/abc/exec", `{"Privileged":true}`, false},
+		{"privileged exec denied, lowercase key", "POST", "/v1.45/containers/abc/exec", `{"privileged":true}`, false},
+		{"encoded privileged exec denied", "POST", "/v1.45/containers/abc/%65xec", `{"Privileged":true}`, false},
+		{"malformed exec denied", "POST", "/v1.45/containers/abc/exec", `not json`, false},
+		{"normal exec allowed", "POST", "/v1.45/containers/abc/exec", `{"AttachStdout":true,"Cmd":["ls"],"Privileged":false,"User":"root"}`, true},
+		{"exec start allowed", "POST", "/v1.45/exec/def/start", `{"Detach":false,"Tty":true}`, true},
 		// The daemon routes the decoded path, so an encoded one must be
 		// judged the same way (2026-10-08 audit B-01).
 		{"encoded create still denied", "POST", "/v1.45/containers/cr%65ate", `{"HostConfig":{"Privileged":true,"Binds":["/:/host"]}}`, false},

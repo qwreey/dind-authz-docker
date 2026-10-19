@@ -29,7 +29,7 @@ already recorded there.
 - `Dockerfile` - three build-target stages layered on top of stock
   `docker:dind`: `dind` (no protection), `dind-authz` (default - denies
   privileged/dangerous-cap/host-namespace/out-of-`/code`-mount container
-  creation, plus the swarm and v2-plugin endpoint families wholesale, via a
+  creation and privileged `exec`, plus the swarm and v2-plugin endpoint families wholesale, via a
   hand-written Go authz plugin), `dind-authz-remap`
   (`dind-authz` + Docker userns-remap, opt-in). `docker-compose.yml`'s
   `DIND_TARGET` env var picks which stage `code-docker-dind` actually
@@ -65,8 +65,10 @@ already recorded there.
   through `policy.go`'s `decide()`, which does two things: refuse a denied
   *endpoint family* outright (`deniedEndpointFamilies` - swarm/services/
   tasks/nodes/secrets/configs and plugins, all methods), then body-inspect
-  the two endpoints that can smuggle host access through an otherwise
-  ordinary call (`containers/create`, `volumes/create`). The family list is
+  the three endpoints that can smuggle host access through an otherwise
+  ordinary call (`containers/create`, `volumes/create`, and
+  `containers/{id}/exec` - `docker exec --privileged` hands a process in an
+  unprivileged container every capability). The family list is
   not "endpoints we don't use" tidiness - each one *routes around* the body
   checks: a swarm task's container is built by the daemon's own swarmkit
   executor and never reaches an authz plugin at all, and a v2 plugin's

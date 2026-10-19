@@ -69,6 +69,12 @@ type createBody struct {
 	} `json:"HostConfig"`
 }
 
+// execBody is the subset of a POST .../containers/{id}/exec request body
+// this plugin inspects.
+type execBody struct {
+	Privileged bool `json:"Privileged"`
+}
+
 // volumeCreateBody is the subset of a POST .../volumes/create request body
 // this plugin inspects — the "local" driver options here use the same
 // bind-passthrough mechanism as a Mounts[].VolumeOptions.DriverConfig entry
@@ -120,7 +126,7 @@ var deniedEndpointFamilies = map[string]string{
 }
 
 // decide is the whole policy for one authorization request: a denied
-// endpoint family first, then the body-inspecting checks for the two
+// endpoint family first, then the body-inspecting checks for the three
 // endpoints that can smuggle host access through an otherwise ordinary
 // call. Everything else is allowed — inverting that default (allow-list the
 // endpoints `docker compose` needs) was considered and rejected as a
@@ -137,6 +143,8 @@ func decide(method, uri string, body []byte, cfg *config) (allow bool, reason st
 		return evaluate(body, cfg)
 	case isVolumesCreate(method, uri):
 		return evaluateVolumeCreate(body, cfg)
+	case isContainersExec(method, uri):
+		return evaluateExec(body)
 	}
 	return true, ""
 }
@@ -191,6 +199,33 @@ func isVolumesCreate(method, uri string) bool {
 	}
 	u, ok := requestPath(uri)
 	return ok && path.Base(u) == "create" && strings.HasSuffix(path.Dir(u), "/volumes")
+}
+
+// isContainersExec reports whether a request creates an exec instance
+// (`docker exec`), on the decoded path (requestPath). Starting it
+// (/exec/{id}/start) carries no privilege fields, so creation is the one
+// call to judge.
+func isContainersExec(method, uri string) bool {
+	if method != "POST" {
+		return false
+	}
+	u, ok := requestPath(uri)
+	return ok && path.Base(u) == "exec" && strings.HasSuffix(path.Dir(path.Dir(u)), "/containers")
+}
+
+// evaluateExec refuses `docker exec --privileged`: the daemon gives that
+// process every capability and no seccomp/AppArmor profile inside an
+// otherwise unprivileged container, which is evaluate()'s Privileged check
+// reached after the fact. Same fail-closed rule for a body it can't parse.
+func evaluateExec(body []byte) (allow bool, reason string) {
+	var req execBody
+	if err := json.Unmarshal(body, &req); err != nil {
+		return false, "malformed request body"
+	}
+	if req.Privileged {
+		return false, "privileged exec is not allowed"
+	}
+	return true, ""
 }
 
 // evaluate decides whether a container-create request is allowed under cfg.
