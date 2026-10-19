@@ -51,12 +51,17 @@ type createBody struct {
 		PidMode           string            `json:"PidMode"`
 		NetworkMode       string            `json:"NetworkMode"`
 		IpcMode           string            `json:"IpcMode"`
+		UTSMode           string            `json:"UTSMode"`
 		CgroupnsMode      string            `json:"CgroupnsMode"`
 		UsernsMode        string            `json:"UsernsMode"`
 		Devices           []json.RawMessage `json:"Devices"`
 		DeviceCgroupRules []string          `json:"DeviceCgroupRules"`
-		Binds             []string          `json:"Binds"`
-		Mounts            []struct {
+		// Pointers so "absent/null" (the daemon's default masking) is
+		// told apart from "set" - any list here replaces the defaults.
+		MaskedPaths   *[]string `json:"MaskedPaths"`
+		ReadonlyPaths *[]string `json:"ReadonlyPaths"`
+		Binds         []string  `json:"Binds"`
+		Mounts        []struct {
 			Type          string `json:"Type"`
 			Source        string `json:"Source"`
 			VolumeOptions *struct {
@@ -260,8 +265,10 @@ func evaluate(body []byte, cfg *config) (allow bool, reason string) {
 			strings.Contains(lower, "apparmor=unconfined") ||
 			strings.Contains(lower, "apparmor:unconfined") ||
 			strings.Contains(lower, "label=disable") ||
-			strings.Contains(lower, "label:disable") {
-			return false, "disabling seccomp/apparmor/labeling is not allowed: " + opt
+			strings.Contains(lower, "label:disable") ||
+			strings.Contains(lower, "systempaths=unconfined") ||
+			strings.Contains(lower, "systempaths:unconfined") {
+			return false, "disabling seccomp/apparmor/labeling/masked paths is not allowed: " + opt
 		}
 	}
 	if hc.PidMode == "host" {
@@ -272,6 +279,14 @@ func evaluate(body []byte, cfg *config) (allow bool, reason string) {
 	}
 	if hc.IpcMode == "host" {
 		return false, "ipc=host is not allowed"
+	}
+	if hc.UTSMode == "host" {
+		return false, "uts=host is not allowed"
+	}
+	// What systempaths=unconfined does, spelled as the raw lists: an empty
+	// MaskedPaths unmasks /proc/sysrq-trigger and friends.
+	if hc.MaskedPaths != nil || hc.ReadonlyPaths != nil {
+		return false, "overriding masked/read-only paths is not allowed"
 	}
 	if hc.CgroupnsMode == "host" {
 		return false, "cgroupns=host is not allowed"
@@ -338,15 +353,23 @@ func evaluateVolumeCreate(body []byte, cfg *config) (allow bool, reason string) 
 
 // driverOptsAllowed reports whether a volume's driver+options are safe: a
 // plain named/anonymous volume with the default (or no) driver and no
-// options lives entirely inside dind's own storage and is always safe. Any
-// driver options at all are only allowed if they don't request a host bind
-// passthrough — recognized here by the presence of a "device" option, the
-// "local" driver's trigger for treating the volume as a bind mount of that
-// host path (typically paired with "o=bind"/"type=none", but the device key
-// alone is treated as the meaningful signal so this fails closed rather than
-// pattern-matching every way to spell "bind"). An unrecognized (non-empty,
-// non-"local") driver name can't be reasoned about at all, so it's only
-// allowed with zero options.
+// options lives entirely inside dind's own storage and is always safe. An
+// unrecognized (non-empty, non-"local") driver name can't be reasoned about
+// at all, so it's only allowed with zero options.
+//
+// The "local" driver's options are a mount(2) call - type, source (device)
+// and option string (o) - so every option that names a directory is a path
+// into dind's own filesystem and gets bindSourceAllowed's check:
+//
+//   - device, when absolute (a bind source or a block device). A bind
+//     (type none/bind, or a bind/rbind token in o) must give an absolute
+//     device: a relative one is resolved against the daemon's working
+//     directory, which bindSourceAllowed would wave through as a named
+//     volume. Other relative devices are pseudo sources (tmpfs, overlay,
+//     an nfs export) and pass.
+//   - overlayfs's lowerdir/upperdir/workdir/datadir in o, including the
+//     appending "lowerdir+=" forms and every ':'-separated lower layer.
+//     Relative ones are refused outright for the same reason as above.
 func driverOptsAllowed(driverName string, opts map[string]string, allowRoots []string) bool {
 	if driverName != "" && driverName != "local" {
 		return len(opts) == 0
@@ -354,9 +377,31 @@ func driverOptsAllowed(driverName string, opts map[string]string, allowRoots []s
 	if len(opts) == 0 {
 		return true
 	}
+	isBind := opts["type"] == "none" || opts["type"] == "bind"
+	for _, tok := range strings.Split(opts["o"], ",") {
+		key, value, hasValue := strings.Cut(tok, "=")
+		key = strings.TrimSuffix(strings.TrimSpace(key), "+")
+		if !hasValue {
+			if key == "bind" || key == "rbind" {
+				isBind = true
+			}
+			continue
+		}
+		switch key {
+		case "lowerdir", "upperdir", "workdir", "datadir":
+			for _, dir := range strings.Split(value, ":") {
+				if !strings.HasPrefix(dir, "/") || !bindSourceAllowed(dir, allowRoots) {
+					return false
+				}
+			}
+		}
+	}
 	device, hasDevice := opts["device"]
 	if !hasDevice {
 		return true
+	}
+	if isBind && !strings.HasPrefix(device, "/") {
+		return false
 	}
 	return bindSourceAllowed(device, allowRoots)
 }
