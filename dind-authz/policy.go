@@ -209,13 +209,15 @@ func isVolumesCreate(method, uri string) bool {
 // isContainersExec reports whether a request creates an exec instance
 // (`docker exec`), on the decoded path (requestPath). Starting it
 // (/exec/{id}/start) carries no privilege fields, so creation is the one
-// call to judge.
+// call to judge. The container name may span several segments: dockerd's route
+// is /containers/{name:.*}/exec, and a legacy link registers the name
+// /<parent>/<alias>.
 func isContainersExec(method, uri string) bool {
 	if method != "POST" {
 		return false
 	}
 	u, ok := requestPath(uri)
-	return ok && path.Base(u) == "exec" && strings.HasSuffix(path.Dir(path.Dir(u)), "/containers")
+	return ok && path.Base(u) == "exec" && strings.Contains(path.Dir(u), "/containers/")
 }
 
 // splitSecurityOpt splits a SecurityOpt entry the way dockerd does: on the
