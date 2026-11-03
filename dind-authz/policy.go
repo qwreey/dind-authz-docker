@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -90,6 +91,10 @@ type volumeCreateBody struct {
 	DriverOpts map[string]string `json:"DriverOpts"`
 }
 
+type networkCreateBody struct {
+	Driver string `json:"Driver"`
+}
+
 // deniedEndpointFamilies maps an endpoint family (the first path segment
 // after the optional /v1.NN/ API-version prefix) to the reason it's refused.
 // These are whole families this environment has no use for, each of which
@@ -148,6 +153,8 @@ func decide(method, uri string, body []byte, cfg *config) (allow bool, reason st
 		return evaluate(body, cfg)
 	case isVolumesCreate(method, uri):
 		return evaluateVolumeCreate(body, cfg)
+	case isNetworksCreate(method, uri):
+		return evaluateNetworkCreate(body)
 	case isContainersExec(method, uri):
 		return evaluateExec(body)
 	}
@@ -204,6 +211,16 @@ func isVolumesCreate(method, uri string) bool {
 	}
 	u, ok := requestPath(uri)
 	return ok && path.Base(u) == "create" && strings.HasSuffix(path.Dir(u), "/volumes")
+}
+
+// isNetworksCreate reports whether a request creates a network, on the
+// decoded path (requestPath).
+func isNetworksCreate(method, uri string) bool {
+	if method != "POST" {
+		return false
+	}
+	u, ok := requestPath(uri)
+	return ok && path.Base(u) == "create" && strings.HasSuffix(path.Dir(u), "/networks")
 }
 
 // isContainersExec reports whether a request creates an exec instance
@@ -366,6 +383,26 @@ func evaluateVolumeCreate(body []byte, cfg *config) (allow bool, reason string) 
 		return false, "volume driver options not allowed (bind-mount passthrough)"
 	}
 	return true, ""
+}
+
+// evaluateNetworkCreate allows the bridge driver only. macvlan and ipvlan
+// are built in (so the plugins family deny doesn't cover them) and attach a
+// nested container to a parent interface of dind's own - its leg on
+// code-docker-internal - putting it on that network directly, beside router
+// and code-docker, instead of behind dind's NAT. Compose's networks,
+// internal ones included, are bridge networks. Fails closed on a body it
+// can't decode, like the other checks; JSON keys match case-insensitively,
+// as in the daemon's decoder.
+func evaluateNetworkCreate(body []byte) (allow bool, reason string) {
+	var req networkCreateBody
+	if err := json.Unmarshal(body, &req); err != nil {
+		return false, "malformed request body"
+	}
+	switch req.Driver {
+	case "", "bridge":
+		return true, ""
+	}
+	return false, "network driver " + strconv.Quote(req.Driver) + " not allowed (bridge only)"
 }
 
 // driverOptsAllowed reports whether a volume's driver+options are safe: a

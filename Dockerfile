@@ -52,7 +52,7 @@ WORKDIR /src
 COPY dind-authz/go.mod ./
 COPY dind-authz/*.go ./
 RUN CGO_ENABLED=0 go test ./... && \
-    CGO_ENABLED=0 go build -ldflags="-s -w" -o /dind-authz .
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /dind-authz .
 
 FROM dind AS dind-authz
 COPY --from=dind-authz-build /dind-authz /usr/local/bin/dind-authz
