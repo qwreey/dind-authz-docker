@@ -67,6 +67,23 @@ func TestEvaluate(t *testing.T) {
 			`{"HostConfig":{"Mounts":[{"Type":"volume","VolumeOptions":{"DriverConfig":{"Name":"nfs","Options":{}}}}]}}`, true},
 		{"mount type volume with unrecognized driver and options denied",
 			`{"HostConfig":{"Mounts":[{"Type":"volume","VolumeOptions":{"DriverConfig":{"Name":"nfs","Options":{"share":"host:/export"}}}}]}}`, false},
+		{"no-new-privileges=true passes", `{"HostConfig":{"SecurityOpt":["no-new-privileges=true"]}}`, true},
+		{"no-new-privileges with a non-bool value denied", `{"HostConfig":{"SecurityOpt":["no-new-privileges=maybe"]}}`, false},
+		{"docker-default apparmor profile passes", `{"HostConfig":{"SecurityOpt":["apparmor=docker-default"]}}`, true},
+		{"other apparmor profile denied", `{"HostConfig":{"SecurityOpt":["apparmor=my-profile"]}}`, false},
+		{"label disable denied", `{"HostConfig":{"SecurityOpt":["label=disable"]}}`, false},
+		{"bare disable denied", `{"HostConfig":{"SecurityOpt":["disable"]}}`, false},
+		{"label type denied", `{"HostConfig":{"SecurityOpt":["label=type:spc_t"]}}`, false},
+		{"writable-cgroups denied", `{"HostConfig":{"SecurityOpt":["writable-cgroups=true"]}}`, false},
+		{"unknown security-opt key denied", `{"HostConfig":{"SecurityOpt":["future-knob=on"]}}`, false},
+		{"security-opt key compared case-sensitively", `{"HostConfig":{"SecurityOpt":["Seccomp=builtin"]}}`, false},
+		{"one bad entry among good ones denied", `{"HostConfig":{"SecurityOpt":["no-new-privileges","writable-cgroups=true"]}}`, false},
+		{"tmpfs mount passes", `{"HostConfig":{"Mounts":[{"Type":"tmpfs","Target":"/tmp"}]}}`, true},
+		{"image mount passes", `{"HostConfig":{"Mounts":[{"Type":"image","Source":"alpine","Target":"/img"}]}}`, true},
+		{"npipe mount denied", `{"HostConfig":{"Mounts":[{"Type":"npipe","Source":"x"}]}}`, false},
+		{"cluster mount denied", `{"HostConfig":{"Mounts":[{"Type":"cluster","Source":"x"}]}}`, false},
+		{"empty mount type denied", `{"HostConfig":{"Mounts":[{"Source":"/code/x"}]}}`, false},
+		{"unknown mount type denied", `{"HostConfig":{"Mounts":[{"Type":"future","Source":"/"}]}}`, false},
 		{"malformed json fails closed", `not json`, false},
 		{"truncated json fails closed", `{"HostConfig":{"Privileged"`, false},
 	}
@@ -270,12 +287,52 @@ func TestDecide(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			allow, reason := decide(tc.method, tc.uri, []byte(tc.body), testConfig())
+			allow, reason := decide(tc.method, tc.uri, nil, []byte(tc.body), testConfig())
 			if allow != tc.allow {
 				t.Errorf("decide(%s %s, %s) = allow=%v reason=%q, want allow=%v", tc.method, tc.uri, tc.body, allow, reason, tc.allow)
 			}
 			if !allow && reason == "" {
 				t.Errorf("decide(%s %s) denied with no reason", tc.method, tc.uri)
+			}
+		})
+	}
+}
+
+// TestDecideBuild covers the legacy build endpoint: its network mode, in
+// every spelling the daemon would read, and the build calls that must keep
+// working.
+func TestDecideBuild(t *testing.T) {
+	tar := map[string]string{"Content-Type": "application/x-tar"}
+	cases := []struct {
+		name    string
+		uri     string
+		headers map[string]string
+		allow   bool
+	}{
+		{"plain build allowed", "/v1.45/build?t=x", tar, true},
+		{"build with no headers allowed", "/build?t=x", nil, true},
+		{"bridge network build allowed", "/v1.45/build?networkmode=bridge", tar, true},
+		{"default network build allowed", "/v1.45/build?networkmode=default", tar, true},
+		{"host network build denied", "/v1.45/build?networkmode=host", tar, false},
+		{"host network build denied without version prefix", "/build?networkmode=host", tar, false},
+		{"host network build denied, mixed case", "/v1.45/build?networkmode=HOST", tar, false},
+		{"host network as a later duplicate denied", "/v1.45/build?networkmode=bridge&networkmode=host", tar, false},
+		{"encoded host network denied", "/v1.45/build?networkmode=%68ost", tar, false},
+		{"encoded build path still checked", "/v1.45/%62uild?networkmode=host", tar, false},
+		{"unparsable query denied", "/v1.45/build?networkmode=%zz", tar, false},
+		{"form-encoded build denied", "/v1.45/build?t=x", map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, false},
+		{"form-encoded build denied, lowercase header and params", "/v1.45/build", map[string]string{"content-type": "Application/X-WWW-Form-Urlencoded; charset=utf-8"}, false},
+		{"form type joined with another denied", "/v1.45/build", map[string]string{"Content-Type": "application/x-www-form-urlencoded,application/x-tar"}, false},
+		{"build prune not judged as a build", "/v1.45/build/prune?networkmode=host", nil, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			allow, reason := decide("POST", tc.uri, tc.headers, nil, testConfig())
+			if allow != tc.allow {
+				t.Errorf("decide(POST %s, %v) = allow=%v reason=%q, want allow=%v", tc.uri, tc.headers, allow, reason, tc.allow)
+			}
+			if !allow && reason == "" {
+				t.Errorf("decide(POST %s) denied with no reason", tc.uri)
 			}
 		})
 	}

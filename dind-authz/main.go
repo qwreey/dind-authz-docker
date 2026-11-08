@@ -27,9 +27,10 @@ import (
 // relies on encoding/json's built-in base64 handling, matching how Docker
 // itself encodes the field.
 type authZReq struct {
-	RequestMethod string `json:"RequestMethod"`
-	RequestURI    string `json:"RequestURI"`
-	RequestBody   []byte `json:"RequestBody"`
+	RequestMethod  string            `json:"RequestMethod"`
+	RequestURI     string            `json:"RequestURI"`
+	RequestBody    []byte            `json:"RequestBody"`
+	RequestHeaders map[string]string `json:"RequestHeaders"`
 }
 
 type authZRes struct {
@@ -64,7 +65,7 @@ func main() {
 			writeJSON(w, authZRes{Allow: false, Msg: "dind-authz: malformed request"})
 			return
 		}
-		allow, reason := decide(req.RequestMethod, req.RequestURI, req.RequestBody, cfg)
+		allow, reason := decide(req.RequestMethod, req.RequestURI, req.RequestHeaders, req.RequestBody, cfg)
 		if !allow {
 			log.Printf("dind-authz: denied %s %s: %s", req.RequestMethod, req.RequestURI, reason)
 		}

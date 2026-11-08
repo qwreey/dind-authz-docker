@@ -1,0 +1,8 @@
+{
+  "builder": {
+    "entitlements": {
+      "network-host": false,
+      "security-insecure": false
+    }
+  }
+}

@@ -121,10 +121,11 @@ type networkCreateBody struct {
 //
 // Two neighbours deliberately *not* listed: /build and /session. BuildKit's
 // escalation knobs are gated daemon-side rather than in the request —
-// `RUN --security=insecure` needs the daemon's builder.entitlements.
-// security-insecure (false unless someone turns it on in dind's own
-// daemon.json), and `RUN --mount=type=bind` binds build context/stages, not
-// host paths — so denying them would break every `docker build` for no gain.
+// `RUN --security=insecure` and `--network=host` need the daemon's
+// builder.entitlements, which the image's daemon.json turns off — and
+// `RUN --mount=type=bind` binds build context/stages, not host paths — so
+// denying them would break every `docker build` for no gain. /build's own
+// network mode is judged by evaluateBuild instead.
 var deniedEndpointFamilies = map[string]string{
 	"swarm":    "swarm mode is not allowed",
 	"services": "swarm services are not allowed",
@@ -138,10 +139,10 @@ var deniedEndpointFamilies = map[string]string{
 // decide is the whole policy for one authorization request: a denied
 // endpoint family first, then the body-inspecting checks for the three
 // endpoints that can smuggle host access through an otherwise ordinary
-// call. Everything else is allowed — inverting that default (allow-list the
+// call, and the legacy build endpoint's network mode. Everything else is allowed — inverting that default (allow-list the
 // endpoints `docker compose` needs) was considered and rejected as a
 // regression risk out of proportion to the gain, see the family list above.
-func decide(method, uri string, body []byte, cfg *config) (allow bool, reason string) {
+func decide(method, uri string, headers map[string]string, body []byte, cfg *config) (allow bool, reason string) {
 	if _, ok := requestPath(uri); !ok {
 		return false, "request URI could not be parsed"
 	}
@@ -157,6 +158,8 @@ func decide(method, uri string, body []byte, cfg *config) (allow bool, reason st
 		return evaluateNetworkCreate(body)
 	case isContainersExec(method, uri):
 		return evaluateExec(body)
+	case isBuild(method, uri):
+		return evaluateBuild(uri, headers)
 	}
 	return true, ""
 }
@@ -180,13 +183,20 @@ func requestPath(uri string) (p string, ok bool) {
 // "/v1.45/swarm/init" and "/plugins/foo/enable?x=1" both reduce to the
 // family name the deny list is keyed on.
 func apiRoot(uri string) string {
+	first, _, _ := strings.Cut(unversionedPath(uri), "/")
+	return first
+}
+
+// unversionedPath is requestPath without its leading slash and /v1.NN/
+// API-version prefix: "/v1.45/build?x=1" becomes "build".
+func unversionedPath(uri string) string {
 	u, _ := requestPath(uri)
 	u = strings.TrimPrefix(u, "/")
 	first, rest, _ := strings.Cut(u, "/")
 	if len(first) > 1 && first[0] == 'v' && first[1] >= '0' && first[1] <= '9' {
-		first, _, _ = strings.Cut(rest, "/")
+		return rest
 	}
-	return first
+	return u
 }
 
 // isContainersCreate reports whether a request is a "create a container"
@@ -237,6 +247,46 @@ func isContainersExec(method, uri string) bool {
 	return ok && path.Base(u) == "exec" && strings.Contains(path.Dir(u), "/containers/")
 }
 
+// isBuild reports whether a request is an image build (POST /build, not
+// /build/prune or /build/cancel), on the decoded path (requestPath).
+func isBuild(method, uri string) bool {
+	return method == "POST" && unversionedPath(uri) == "build"
+}
+
+// evaluateBuild refuses `docker build --network=host`, whose RUN steps would
+// share dind's own network namespace - the network=host evaluate() refuses
+// for a container. A build's containers are made by the daemon itself and
+// never reach this plugin, so the build request is the one place to judge.
+// This covers the /build endpoint only: buildx's gRPC session carries the
+// network mode where no authz plugin sees it, which is why the image also
+// turns off dockerd's network-host build entitlement (daemon.json). Every
+// networkmode value is checked, not just the first. dockerd reads the
+// parameter from a form-encoded body as well as the query, and this plugin
+// is never sent that body, so a form-encoded /build is refused outright -
+// matched anywhere in the header value, since a repeated Content-Type may
+// arrive joined into one string while the daemon reads only the first.
+func evaluateBuild(uri string, headers map[string]string) (allow bool, reason string) {
+	for k, v := range headers {
+		if strings.EqualFold(k, "Content-Type") && strings.Contains(strings.ToLower(v), "application/x-www-form-urlencoded") {
+			return false, "form-encoded build requests are not allowed"
+		}
+	}
+	u, err := url.ParseRequestURI(uri)
+	if err != nil {
+		return false, "request URI could not be parsed"
+	}
+	query, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return false, "build query could not be parsed"
+	}
+	for _, mode := range query["networkmode"] {
+		if strings.EqualFold(mode, "host") {
+			return false, "build network=host is not allowed"
+		}
+	}
+	return true, ""
+}
+
 // splitSecurityOpt splits a SecurityOpt entry the way dockerd does: on the
 // first '=' when there is one, else on the first ':' (the deprecated form).
 func splitSecurityOpt(opt string) (key, value string) {
@@ -245,6 +295,33 @@ func splitSecurityOpt(opt string) (key, value string) {
 	}
 	k, v, _ := strings.Cut(opt, ":")
 	return k, v
+}
+
+// securityOptAllowed is an allow-list rather than a list of known-bad
+// values: dockerd refuses a key it doesn't know, but one it learns in a later
+// release (writable-cgroups is a recent example) would otherwise reach a
+// nested container unseen here. A legitimate option this refuses is fixed by
+// adding it; an unknown one let through is an escalation nobody reviewed.
+// Keys and values compare case-sensitively, as dockerd's own parser does.
+// label= is refused too: a no-op without SELinux, and with it type:spc_t
+// is an unconfined container.
+func securityOptAllowed(opt string) bool {
+	if opt == "no-new-privileges" {
+		return true
+	}
+	key, value := splitSecurityOpt(opt)
+	switch key {
+	case "no-new-privileges":
+		_, err := strconv.ParseBool(value)
+		return err == nil
+	case "seccomp":
+		// Any other value is a whole profile, which may allow every
+		// syscall - the same as unconfined.
+		return value == "builtin"
+	case "apparmor":
+		return value == "docker-default"
+	}
+	return false
 }
 
 // evaluateExec refuses `docker exec --privileged`: the daemon gives that
@@ -288,21 +365,8 @@ func evaluate(body []byte, cfg *config) (allow bool, reason string) {
 		}
 	}
 	for _, opt := range hc.SecurityOpt {
-		lower := strings.ToLower(opt)
-		if strings.Contains(lower, "seccomp=unconfined") ||
-			strings.Contains(lower, "seccomp:unconfined") ||
-			strings.Contains(lower, "apparmor=unconfined") ||
-			strings.Contains(lower, "apparmor:unconfined") ||
-			strings.Contains(lower, "label=disable") ||
-			strings.Contains(lower, "label:disable") ||
-			strings.Contains(lower, "systempaths=unconfined") ||
-			strings.Contains(lower, "systempaths:unconfined") {
-			return false, "disabling seccomp/apparmor/labeling/masked paths is not allowed: " + opt
-		}
-		// A seccomp value other than the built-in default is a whole
-		// profile, which may allow every syscall - the same as unconfined.
-		if key, value := splitSecurityOpt(opt); strings.EqualFold(key, "seccomp") && value != "builtin" {
-			return false, "custom seccomp profiles are not allowed"
+		if !securityOptAllowed(opt) {
+			return false, "security option not allowed: " + opt
 		}
 	}
 	if hc.PidMode == "host" {
@@ -348,6 +412,7 @@ func evaluate(body []byte, cfg *config) (allow bool, reason string) {
 	}
 	for _, m := range hc.Mounts {
 		switch m.Type {
+		case "tmpfs", "image":
 		case "bind":
 			if !bindSourceAllowed(m.Source, cfg.BindAllowPrefixes) {
 				return false, "bind mount source not allowed: " + m.Source
@@ -362,6 +427,10 @@ func evaluate(body []byte, cfg *config) (allow bool, reason string) {
 			if !driverOptsAllowed(driverName, opts, cfg.BindAllowPrefixes) {
 				return false, "volume mount driver options not allowed (bind-mount passthrough): " + m.Source
 			}
+		default:
+			// An allow-list for the same reason as securityOptAllowed: a
+			// mount type a later daemon adds would otherwise pass unchecked.
+			return false, "mount type not allowed: " + strconv.Quote(m.Type)
 		}
 	}
 

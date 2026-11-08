@@ -62,6 +62,11 @@ COPY --from=dind-authz-build /dind-authz /usr/local/bin/dind-authz
 # can never edit the policy that constrains it) is merged on top at
 # entrypoint time, not baked into the image.
 COPY config/dind-authz/*.default.json /etc/dind-authz-defaults.d/
+# BuildKit's two escalation entitlements, off in the daemon itself: buildx
+# asks for them over a gRPC session no authz plugin is shown, so the plugin's
+# /build check alone can't refuse them. security-insecure is already off by
+# default; stating it keeps a later default change from turning it on here.
+COPY config/dockerd/daemon.json /etc/docker/daemon.json
 
 # dind-authz-remap: on top of dind-authz's request-level filtering, also
 # remap nested-container UID 0 to an unprivileged host UID via Docker's

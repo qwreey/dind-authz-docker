@@ -29,8 +29,9 @@ already recorded there.
 - `Dockerfile` - three build-target stages layered on top of stock
   `docker:dind`: `dind` (no protection), `dind-authz` (default - denies
   privileged/dangerous-cap/host-namespace/out-of-`/code`-mount container
-  creation, privileged `exec` and non-bridge networks, plus the swarm and v2-plugin endpoint families wholesale, via a
-  hand-written Go authz plugin), `dind-authz-remap`
+  creation, privileged `exec`, non-bridge networks and host-network builds, plus the swarm and v2-plugin endpoint families wholesale, via a
+  hand-written Go authz plugin, and BuildKit's network-host/security-insecure
+  entitlements off in `config/dockerd/daemon.json`), `dind-authz-remap`
   (`dind-authz` + Docker userns-remap, opt-in). `docker-compose.yml`'s
   `DIND_TARGET` env var picks which stage `code-docker-dind` actually
   builds/runs - a build-stage choice rather than a runtime toggle so an
@@ -70,7 +71,10 @@ already recorded there.
   `containers/{id}/exec` - `docker exec --privileged` hands a process in an
   unprivileged container every capability - and `networks/create`, bridge
   driver only, since macvlan/ipvlan would put a nested container on
-  code-docker-internal itself instead of behind dind's NAT). The family list is
+  code-docker-internal itself instead of behind dind's NAT) - plus `/build`'s
+  `networkmode` query. `SecurityOpt` values and `Mounts[].Type` are
+  allow-lists, not lists of known-bad values: an option or mount type a later
+  Docker release adds is refused until someone reviews and lists it. The family list is
   not "endpoints we don't use" tidiness - each one *routes around* the body
   checks: a swarm task's container is built by the daemon's own swarmkit
   executor and never reaches an authz plugin at all, and a v2 plugin's
