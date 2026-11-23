@@ -47,7 +47,7 @@ ENTRYPOINT ["/dind-entrypoint.sh"]
 # and an untrusted binary fetch, matching this repo's existing pattern of
 # building its own Go binaries (see webmanager-backend in the root
 # Dockerfile).
-FROM golang:1.25-alpine AS dind-authz-build
+FROM golang:1.27-alpine AS dind-authz-build
 WORKDIR /src
 COPY dind-authz/go.mod ./
 COPY dind-authz/*.go ./
